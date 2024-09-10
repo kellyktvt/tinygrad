@@ -16,7 +16,7 @@ from tinygrad.ops import BinaryOps, MetaOps, UOp, UnaryOps, UOps
 from tinygrad.ops import graph_rewrite
 from tinygrad.helpers import AST_REWRITE, CI, DEBUG, FUSE_ARANGE, flatten, getenv, SPLIT_REDUCEOP, unwrap, prod
 from tinygrad.codegen.kernel import Kernel, verify_ast
-from tinygrad.engine.schedule import create_schedule, reduceop_fusor, st_fixup
+from tinygrad.engine.schedule import create_schedule, push_swizzle_down_through_elementwise, reduceop_fusor, st_fixup
 from tinygrad.engine.realize import CompiledRunner, run_schedule
 from test.helpers import ast_const, is_dtype_supported, Context, timeit
 from tinygrad.lazy import LazyBuffer, view_supported_devices
@@ -1706,6 +1706,16 @@ class TestScheduleRewrite(unittest.TestCase):
     new_load_st = unwrap([x for x in ret.parents if x.op is UOps.SHAPETRACKER][0].st)
     self.assertGreater(prod(new_load_st.shape), prod(ld_st.shape))
     self.assertEqual(new_load_st.views[0].strides, (0, 9, 3, 0, 1, 0, 27))
+
+  def test_swizzle_hopping(self):
+    start = UOp(UOps.LOAD, dtypes.float, (UOp(UOps.DEFINE_GLOBAL, PtrDType(dtypes.float), (), 0), ShapeTracker.from_shape((4, 4)).to_uop()))
+    r = UOp(UOps.REDUCE_AXIS, dtypes.float, (start,), (BinaryOps.ADD, (0, 1)))
+    r = UOp(UOps.SWIZZLE, dtypes.float, (r,), ShapeTracker.from_shape(()))
+    alu = r+ast_const(dtypes.float, 1.0, ())
+    ret = push_swizzle_down_through_elementwise(alu)
+    from test.external.process_replay.helpers import print_diff
+    print_diff(alu, ret)
+    for i in range(2,6): alu+ast_const(dtypes.float, i, ())
 
 if __name__ == '__main__':
   unittest.main(verbosity=2)
