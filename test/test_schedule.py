@@ -1712,10 +1712,10 @@ class TestScheduleRewrite(unittest.TestCase):
     r = UOp(UOps.REDUCE_AXIS, dtypes.float, (start,), (BinaryOps.ADD, (0, 1)))
     r = UOp(UOps.SWIZZLE, dtypes.float, (r,), ShapeTracker.from_shape(()))
     alu = r+ast_const(dtypes.float, 1.0, ())
-    ret = push_swizzle_down_through_elementwise(alu)
     from test.external.process_replay.helpers import print_diff
-    print_diff(alu, ret)
-    for i in range(2,6): alu+ast_const(dtypes.float, i, ())
+    for i in range(2,6): alu += ast_const(dtypes.float, i, ())
+    new_alu = graph_rewrite(alu, )
+    print_diff(alu, r)
 
 if __name__ == '__main__':
   unittest.main(verbosity=2)
