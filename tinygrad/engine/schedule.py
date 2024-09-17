@@ -111,8 +111,13 @@ def permute_reduce(input_st:ShapeTracker, axis:Tuple[int, ...]) -> Tuple[ShapeTr
 # ***** reduceop fusor *****
 
 def push_swizzle_up_through_reduce(swizzle:UOp, reduceop:UOp) -> Optional[UOp]:
-  if swizzle.arg.contiguous: return None
+  if swizzle.arg.contiguous and swizzle.arg.shape == unwrap(reduceop.st).shape: return None
   rsrc = reduceop.src[0]
+  if prod(swizzle.arg.shape) == prod(unwrap(reduceop.st).shape):
+    assert swizzle.arg.contiguous, f"can't push {swizzle} through this reduceop"
+    new_axis = tuple(i if x != y else 0 for i,(x,y) in enumerate(zip(swizzle.arg.shape, unwrap(rsrc.st).shape)))
+    return UOp(UOps.REDUCE_AXIS, reduceop.dtype, reduceop.src, (reduceop.arg[0], new_axis)).swizzle(swizzle.arg)
+  # push expand through reduce
   tmp, rshape = permute_reduce(ShapeTracker.from_shape(unwrap(rsrc.st).shape), reduceop.arg[1])
   prshape = prod(rshape)
   strides = strides_for_shape(rshape)
