@@ -159,12 +159,13 @@ def rawbufs(lbufs:Iterable[LazyBuffer]) -> Tuple[Buffer, ...]: return tuple(x.ba
 
 def _lower_lazybuffer(outs:List[LazyBuffer], realizes:Dict[LazyBuffer, None]) -> Tuple[ScheduleItem, Dict[Variable, int]]:
   """describe the computation for a LazyBuffer with UOp + inputs + var_vals"""
+  cache: Dict[Tuple[LazyBuffer, ShapeTracker], UOp] = {}
   if (out:=outs[0]).op in {MetaOps.CUSTOM, MetaOps.COPY, MetaOps.EMPTY, MetaOps.VIEW}:
-    return ScheduleItem(UOp(UOps.EXT, out.dtype, (), (out.op, out.arg)), rawbufs((out,)+out.srcs)), {}
+    loads = tuple(_recursive_uop(x, ShapeTracker.from_shape(out.shape), (out,), {}, [], realizes, {}, cache) for x in out.srcs)
+    return ScheduleItem(UOp(UOps.EXT, out.dtype, loads, (out.op, out.arg)), rawbufs((out,)+out.srcs)), {}
   # create the stores
   var_vals = merge_dicts([out.st.var_vals.copy() for out in outs])
   assign_targets = {x.srcs[1]:x for x in outs if x.op is MetaOps.ASSIGN}
-  cache: Dict[Tuple[LazyBuffer, ShapeTracker], UOp] = {}
   ast: List[UOp] = []
   inputs: List[LazyBuffer] = []
   for i, out in enumerate(outs):
@@ -374,8 +375,8 @@ def _graph_schedule(outs:List[LazyBuffer]) -> \
       if (mut:=mutations.get(x)) is None: continue
       if mut.ast.op is UOps.SINK and mut.ast.src[mut.outputs.index(x)].src[2].op is UOps.ASSIGN:
         uop = [x for x in si.ast.sparents if x.op is UOps.LOAD and x.src[0].arg == len(si.outputs)+i]
-        assert all_same([x.op for x in uop])
-        # mutate outputs before a realized parent buffer is assigned to
+        assert all_same([x.op for x in uop]), f"inhomogeneous load from {si}"
+        # mutate outputs before the input buffer is assigned to
         if uop[0].arg is not MetaOps.ASSIGN:
           children[si].append(mut)
           in_degree[mut] += 1
