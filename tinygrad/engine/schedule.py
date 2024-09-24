@@ -138,7 +138,7 @@ def _recursive_uop(buf:LazyBuffer, st:ShapeTracker, outputs:Tuple[LazyBuffer, ..
     if buf not in assign_targets and buf not in inputs: inputs.append(buf)
     ubuf = UOp(UOps.DEFINE_GLOBAL, buf.dtype if isinstance(buf.dtype, ImageDType) else PtrDType(buf.dtype), (),
                outputs.index(assign_targets[buf]) if buf in assign_targets else len(outputs)+inputs.index(buf))
-    return UOp(UOps.LOAD, dtype, (ubuf, unbound_st.to_uop()))
+    return UOp(UOps.LOAD, dtype, (ubuf, unbound_st.to_uop()), buf.op)
 
   # reduce ops change ShapeTracker
   if buf.op in ReduceOps:
@@ -370,10 +370,16 @@ def _graph_schedule(outs:List[LazyBuffer]) -> \
   in_degree: DefaultDict[ScheduleItem, int] = defaultdict(int)
   for si in prescheduled:
     if si not in in_degree: in_degree[si] = 0
-    for x in si.inputs:
+    for i,x in enumerate(si.inputs):
       if (mut:=mutations.get(x)) is None: continue
-      # mutate outputs before a realized parent buffer is assigned to
-      if mut.ast.op is UOps.SINK and mut.ast.src[mut.outputs.index(x)].src[2].op is UOps.ASSIGN: raise Exception("todo!")
+      if mut.ast.op is UOps.SINK and mut.ast.src[mut.outputs.index(x)].src[2].op is UOps.ASSIGN:
+        uop = [x for x in si.ast.sparents if x.op is UOps.LOAD and x.src[0].arg == len(si.outputs)+i]
+        assert all_same([x.op for x in uop])
+        # mutate outputs before a realized parent buffer is assigned to
+        if uop[0].arg is not MetaOps.ASSIGN:
+          children[si].append(mut)
+          in_degree[mut] += 1
+          continue
       # mutate output buffers after all input buffers are mutated
       children[mut].append(si)
       in_degree[si] += 1
