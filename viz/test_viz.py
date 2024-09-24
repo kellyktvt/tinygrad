@@ -122,7 +122,7 @@ class TestViz(unittest.TestCase):
     kernels = load_kernels(contexts)
     self.assertEqual(len(kernels), 1)
     schedule_ctxs = [x for x in kernels[0].ctxs.values() if x.loc.split("/")[-1].split(":")[0] == "schedule.py"]
-    self.assertEqual(len(schedule_ctxs), 1)
+    self.assertEqual(len(schedule_ctxs), 2)
 
   def test_no_dedup_different_opts(self):
     contexts.clear()
@@ -133,7 +133,7 @@ class TestViz(unittest.TestCase):
     kernels = load_kernels(contexts)
     self.assertEqual(len(kernels), 2)
     schedule_ctxs = [x for x in kernels[0].ctxs.values() if x.loc.split("/")[-1].split(":")[0] == "schedule.py"]
-    self.assertEqual(len(schedule_ctxs), 1)
+    self.assertEqual(len(schedule_ctxs), 2)
     schedule_ctxs = [x for x in kernels[1].ctxs.values() if x.loc.split("/")[-1].split(":")[0] == "schedule.py"]
     self.assertEqual(len(schedule_ctxs), 0)
 

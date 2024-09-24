@@ -6,11 +6,11 @@ from dataclasses import dataclass, asdict
 from urllib.parse import parse_qs, urlparse
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from tinygrad import Device
-from tinygrad.helpers import Context, getenv, to_function_name
+from tinygrad.helpers import Context, dedup, getenv, to_function_name
 from tinygrad.ops import TrackedRewriteContext, UOp, UOps
 from tinygrad.engine.graph import uops_colors, word_wrap
 from tinygrad.engine.realize import get_runner
-from tinygrad.engine.schedule import full_ast_rewrite
+from tinygrad.engine.schedule import ScheduleItemContext, full_ast_rewrite
 
 # **** /graph - detailed UOp + rewrites
 
@@ -80,11 +80,15 @@ def load_kernels(contexts:List[TrackedRewriteContext]) -> List[KernelRet]:
   kernel_name = ""
   code = ""
   for ctx in contexts:
+    sink = ctx.sink
     if ctx.loc.split("/")[-1].split(":")[0] == "schedule.py":
-      with Context(TRACK_MATCH_STATS=0): kernel_name, code = (prg:=get_runner(Device.DEFAULT, full_ast_rewrite(ctx.sink)).p).name, prg.src
+      with Context(TRACK_MATCH_STATS=0):
+        global_bufs = dedup([x.arg for x in ctx.sink.sparents if x.op is UOps.DEFINE_GLOBAL])
+        sink = full_ast_rewrite(ctx.sink, ScheduleItemContext(tuple(global_bufs)))
+        kernel_name, code = (prg:=get_runner(Device.DEFAULT, sink).p).name, prg.src
     elif ctx.kernel_name is not None: kernel_name, code = ctx.kernel_name, ""
     if ret.get(k:=to_function_name(kernel_name)) is None: ret[k] = KernelRet(k, code, {})
-    ret[k].ctxs[(ctx.loc, ctx.sink.key)] = ctx
+    ret[k].ctxs[(ctx.loc, sink.key)] = ctx
   return list(ret.values())
 
 class Handler(BaseHTTPRequestHandler):
