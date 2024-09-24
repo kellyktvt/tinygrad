@@ -1,11 +1,11 @@
 import sys, pickle, atexit, importlib, contextlib
 from collections import defaultdict, deque
 from dataclasses import dataclass
-from typing import Callable, Tuple, List, Dict, Optional, DefaultDict, cast, get_args
+from typing import Callable, Iterable, Tuple, List, Dict, Optional, DefaultDict, cast, get_args
 from tinygrad.ops import REDUCE_ALU, MetaOps, ReduceOps, UNSAFE_PAD_OPS, UnaryOps, UOp, UOps, PatternMatcher, UPat, graph_rewrite
-from tinygrad.engine.graph import log_lazybuffer, realized_lazybuffer
+from tinygrad.engine.graph import log_lazybuffer
 from tinygrad.helpers import GRAPH, DEBUG, MULTIOUTPUT, SAVE_SCHEDULE, FUSE_CONV_BW, FUSE_ARANGE, AST_REWRITE, \
-                             GlobalCounters, all_same, colored, prod, dedup, all_int, merge_dicts, getenv, Metadata, unwrap
+                             all_same, colored, prod, dedup, all_int, merge_dicts, getenv, Metadata, unwrap
 from tinygrad.shape.symbolic import Variable, sint
 from tinygrad.dtype import ConstType, ImageDType, PtrDType, dtypes
 from tinygrad.lazy import LazyBuffer
@@ -31,16 +31,6 @@ class ScheduleItem:
   def inputs(self) -> Tuple[Buffer, ...]:
     """Read only buffers in the schedule."""
     return self.bufs[len(self.ast.src):] if self.ast.op is UOps.SINK else self.bufs[1:]
-
-@dataclass(frozen=True)
-class LBScheduleItem:
-  ast: UOp
-  bufs: Tuple[LazyBuffer, ...]
-  metadata: Optional[Tuple[Metadata, ...]] = None
-  @property
-  def outputs(self) -> Tuple[LazyBuffer, ...]: return self.bufs[:len(self.ast.src)] if self.ast.op is UOps.SINK else self.bufs[0:1]
-  @property
-  def inputs(self) -> Tuple[LazyBuffer, ...]: return self.bufs[len(self.ast.src):] if self.ast.op is UOps.SINK else self.bufs[1:]
 
 # *** UOp with SWIZZLE (movementops) rewriting to UOp we can index ***
 
@@ -165,10 +155,12 @@ def _recursive_uop(buf:LazyBuffer, st:ShapeTracker, outputs:Tuple[LazyBuffer, ..
   if buf.op is UnaryOps.BITCAST: return cache.setdefault((buf, st), UOp(UOps.BITCAST, dtype, in_uops))
   return cache.setdefault((buf, st), UOp(UOps.ALU, dtype, in_uops, buf.op))
 
-def _lower_lazybuffer(outs:List[LazyBuffer], realizes:Dict[LazyBuffer, None]) -> Tuple[LBScheduleItem, Dict[Variable, int]]:
+def rawbufs(lbufs:Iterable[LazyBuffer]) -> Tuple[Buffer, ...]: return tuple(x.base.buffer for x in lbufs if x.size != 0)
+
+def _lower_lazybuffer(outs:List[LazyBuffer], realizes:Dict[LazyBuffer, None]) -> Tuple[ScheduleItem, Dict[Variable, int]]:
   """describe the computation for a LazyBuffer with UOp + inputs + var_vals"""
   if (out:=outs[0]).op in {MetaOps.CUSTOM, MetaOps.COPY, MetaOps.EMPTY, MetaOps.VIEW}:
-    return LBScheduleItem(UOp(UOps.EXT, out.dtype, (), (out.op, out.arg)), (out,)+tuple(x.base for x in out.srcs)), {}
+    return ScheduleItem(UOp(UOps.EXT, out.dtype, (), (out.op, out.arg)), rawbufs((out,)+out.srcs)), {}
   # create the stores
   var_vals = merge_dicts([out.st.var_vals.copy() for out in outs])
   assign_targets = {x.srcs[1]:x for x in outs if x.op is MetaOps.ASSIGN}
@@ -185,7 +177,7 @@ def _lower_lazybuffer(outs:List[LazyBuffer], realizes:Dict[LazyBuffer, None]) ->
     ubuf = UOp(UOps.DEFINE_GLOBAL, out.dtype if isinstance(out.dtype, ImageDType) else PtrDType(out.dtype), (), i)
     ast.append(UOp(UOps.STORE, dtypes.void, (ubuf, output_st.to_uop(), src)))
   sink = full_ast_rewrite(ast[0].sink(*ast[1:]))
-  return LBScheduleItem(sink, tuple(outs+inputs), tuple(dedup([x[0].metadata for x in cache if x[0].metadata and x[0] not in inputs]))), var_vals
+  return ScheduleItem(sink, rawbufs(outs+inputs), tuple(dedup([x[0].metadata for x in cache if x[0].metadata and x[0] not in inputs]))), var_vals
 
 # *** DAG creation: decide which LazyBuffers should realize ***
 
@@ -357,43 +349,42 @@ def _get_output_groups(outs:List[LazyBuffer]) -> \
         buf.buffer.options = None
   return output_groups, realizes, assign_targets
 
-SCHEDULES: List[Tuple[DefaultDict[LBScheduleItem, List[LBScheduleItem]], DefaultDict[LBScheduleItem, int]]] = []
+SCHEDULES: List[Tuple[DefaultDict[ScheduleItem, List[ScheduleItem]], DefaultDict[ScheduleItem, int]]] = []
 def _graph_schedule(outs:List[LazyBuffer]) -> \
-  Tuple[DefaultDict[LBScheduleItem, List[LBScheduleItem]],  # this is the graph
-        DefaultDict[LBScheduleItem, int], # this is the in-degree of the graph
+  Tuple[DefaultDict[ScheduleItem, List[ScheduleItem]],  # this is the graph
+        DefaultDict[ScheduleItem, int], # this is the in-degree of the graph
         Dict[Variable, int]]: # this has all the var values of the schedule
   """create a graph for realizing the outputs"""
-  output_groups, realizes, assign_targets = _get_output_groups(outs)
+  output_groups, realizes, _ = _get_output_groups(outs)
   # preschedule all buffers in realizes
-  prescheduled: List[LBScheduleItem] = []
+  prescheduled: List[ScheduleItem] = []
   var_vals: Dict[Variable, int] = {}
   for group in output_groups.values():
     prescheduled.append((ret:=_lower_lazybuffer(group, realizes))[0])
     var_vals = merge_dicts([var_vals, ret[1]])
-  schedule_targets = {out:lsi for lsi in prescheduled for out in lsi.outputs}
+    for x in group: del x.srcs  # can only schedule once
 
-  graph: DefaultDict[LBScheduleItem, List[LBScheduleItem]] = defaultdict(list)
-  in_degree: DefaultDict[LBScheduleItem, int] = defaultdict(int)
-  for lsi in prescheduled:
-    if lsi not in in_degree: in_degree[lsi] = 0
-    # realize outputs after all parents are realized
-    scheduled_parents = dedup(schedule_targets[x] for x in lsi.inputs if x in schedule_targets)
-    for x in scheduled_parents:
-      graph[x].append(lsi)
-      in_degree[lsi] += 1
-    # realize outputs before a parent is assigned to
-    parents_assigns = dedup(schedule_targets[assign_targets[x]] for x in lsi.inputs if x in assign_targets)
-    for assign in parents_assigns:
-      graph[lsi].append(assign)
-      in_degree[assign] += 1
+  # a buffer is mutated exactly once
+  mutations: Dict[Buffer, ScheduleItem] = {x:si for si in prescheduled for x in si.outputs}
+  children: DefaultDict[ScheduleItem, List[ScheduleItem]] = defaultdict(list)
+  in_degree: DefaultDict[ScheduleItem, int] = defaultdict(int)
+  for si in prescheduled:
+    if si not in in_degree: in_degree[si] = 0
+    for x in si.inputs:
+      if (mut:=mutations.get(x)) is None: continue
+      # mutate outputs before a realized parent buffer is assigned to
+      if mut.ast.op is UOps.SINK and mut.ast.src[mut.outputs.index(x)].src[2].op is UOps.ASSIGN: raise Exception("todo!")
+      # mutate output buffers after all input buffers are mutated
+      children[mut].append(si)
+      in_degree[si] += 1
 
   if SAVE_SCHEDULE:
     def _save():
       print(f"saving {len(SCHEDULES)} schedule graphs to", fp:=getenv("SAVE_SCHEDULE_PATH", "schedule.pkl"))
       with open(fp, "wb") as f: pickle.dump(SCHEDULES, f)
     if len(SCHEDULES) == 0: atexit.register(_save)
-    SCHEDULES.append((graph, in_degree))
-  return graph, in_degree, var_vals
+    SCHEDULES.append((children, in_degree))
+  return children, in_degree, var_vals
 
 # *** DAG ordering: breadth first search ***
 
@@ -405,14 +396,9 @@ def create_schedule_with_vars(outs:List[LazyBuffer]) -> Tuple[List[ScheduleItem]
 
   queue = deque(lsi for lsi,deg in in_degree.items() if deg == 0)
   schedule: List[ScheduleItem] = []
-  kernel_number = GlobalCounters.kernel_count
   while queue:
     lsi = queue.popleft()
-    if GRAPH:
-      kernel_number += 1
-      for out in lsi.outputs: realized_lazybuffer(out, kernel_number)
-    for out in lsi.outputs: del out.srcs  # can only schedule once
-    schedule.append(ScheduleItem(lsi.ast, tuple(x.buffer for x in lsi.bufs if x.size != 0), lsi.metadata))
+    schedule.append(lsi)
     for x in graph[lsi]:
       in_degree[x] -= 1
       if in_degree[x] == 0: queue.append(x)
