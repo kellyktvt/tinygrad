@@ -14,7 +14,7 @@ from tinygrad.shape.view import View
 from tinygrad.tensor import Tensor
 from tinygrad.ops import BinaryOps, MetaOps, UOp, UnaryOps, UOps
 from tinygrad.ops import graph_rewrite
-from tinygrad.helpers import AST_REWRITE, CI, DEBUG, FUSE_ARANGE, flatten, getenv, SPLIT_REDUCEOP, unwrap, prod
+from tinygrad.helpers import AST_REWRITE, CI, DEBUG, FUSE_ARANGE, GlobalCounters, flatten, getenv, SPLIT_REDUCEOP, unwrap, prod
 from tinygrad.codegen.kernel import Kernel, verify_ast
 from tinygrad.engine.schedule import create_schedule, reduceop_fusor, st_fixup
 from tinygrad.engine.realize import CompiledRunner, run_schedule
@@ -1299,6 +1299,18 @@ class TestSchedule(unittest.TestCase):
   @unittest.skipUnless(is_dtype_supported(dtypes.half), "need half")
   @unittest.expectedFailure
   def test_conv2d_fused_ast_rewrite_half(self): _test_conv2d(7, FUSE_CONV_BW=1, AST_REWRITE=1, dtype=dtypes.half)
+
+  def test_schedule_gc(self):
+    membase = GlobalCounters.mem_used
+    Tensor.ones(256).contiguous().realize()
+    Tensor.ones(5, 5).contiguous().schedule()
+    self.assertEqual(GlobalCounters.mem_used-membase, 0)
+
+  def test_schedule_no_gc_input_refs(self):
+    membase = GlobalCounters.mem_used
+    x = Tensor.ones(256).contiguous().realize()
+    (x+Tensor.ones(256).contiguous()).schedule()
+    self.assertEqual(GlobalCounters.mem_used-membase, 1024)
 
 class TestIndexing(unittest.TestCase):
   def check_schedule(self, xt:Union[Tensor,List[Tensor]], cnt:int):
