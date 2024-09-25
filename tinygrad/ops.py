@@ -174,6 +174,8 @@ class UOp(MathTrait):
     return f'({", ".join(map(str, self.arg))})' if self.op is UOps.REDUCE_AXIS else repr(self.arg) if isinstance(self.arg, Variable) else self.arg
   # *** uop syntactic sugar
   @property
+  def globals(self) -> List[int]: return [x.arg for x in self.sparents if x.op is UOps.DEFINE_GLOBAL]
+  @property
   def st_arg(self) -> ShapeTracker:
     assert self.op in BUFFER_UOPS, f"st_arg called on {self.op}"
     ret = self.src[0 if self.op is UOps.VALID else 1]

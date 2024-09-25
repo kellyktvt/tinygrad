@@ -37,6 +37,8 @@ class LBScheduleItem:
   ast: UOp
   bufs: Tuple[LazyBuffer, ...]
   metadata: Optional[Tuple[Metadata, ...]] = None
+  @staticmethod
+  def from_sink(sink:UOp, bufs:Tuple[LazyBuffer, ...]): return LBScheduleItem(sink, tuple(x for x in bufs if id(x) in sink.globals))
   @property
   def outputs(self) -> Tuple[LazyBuffer, ...]: return self.bufs[:len(self.ast.src)] if self.ast.op is UOps.SINK else self.bufs[0:1]
   @property
@@ -165,11 +167,12 @@ def _recursive_uop(buf:LazyBuffer, st:ShapeTracker, outputs:Tuple[LazyBuffer, ..
   if buf.op is UnaryOps.BITCAST: return cache.setdefault((buf, st), UOp(UOps.BITCAST, dtype, in_uops))
   return cache.setdefault((buf, st), UOp(UOps.ALU, dtype, in_uops, buf.op))
 
+split_bufs = PatternMatcher([])
 def split_lsi(lsi:LBScheduleItem) -> List[LBScheduleItem]:
-  ret: List[LBScheduleItem] = [lsi]
-  if (buf_max:=Device[lsi.bufs[0].device].renderer.buf_max) is None or len(lsi.bufs) < buf_max: return ret
+  if (buf_max:=Device[lsi.bufs[0].device].renderer.buf_max) is None or len(lsi.bufs) < buf_max: return [lsi]
   assert lsi.ast.op is UOps.SINK, f"can't split {lsi.ast}"
-  return [lsi]
+  new_sink = graph_rewrite(lsi.ast, split_bufs)
+  return [LBScheduleItem.from_sink(u, lsi.bufs) for u in new_sink.sparents if u.op is UOps.SINK]
 
 def _lower_lazybuffer(outs:List[LazyBuffer], realizes:Dict[LazyBuffer, None]) -> Tuple[LBScheduleItem, Dict[Variable, int]]:
   """describe the computation for a LazyBuffer with UOp + inputs + var_vals"""
