@@ -704,6 +704,7 @@ class Kernel:
   # **** this is the lowerer ****
 
   def linearize(self) -> Kernel:
+    if TRACK_MATCH_STATS >= 2: _CURRENT_KERNEL.set(self.name)
     modified_ast = self.get_optimized_ast()
 
     if DEBUG >= 3:
