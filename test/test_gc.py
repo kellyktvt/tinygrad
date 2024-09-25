@@ -42,12 +42,12 @@ class TestGC(unittest.TestCase):
   def test_schedule_gc(self):
     Tensor.ones(256).contiguous().realize()
     Tensor.ones(5, 5).contiguous().schedule()
-    assert (bufs_allocated() == 0)
+    self.assertEqual(bufs_allocated(), 0)
 
   def test_schedule_gc_with_inputs(self):
     x = Tensor.ones(256).contiguous().realize()
     (x+Tensor.ones(256).contiguous()).schedule()
-    assert (bufs_allocated() == 1)
+    self.assertEqual(bufs_allocated(), 1)
 
 if __name__ == '__main__':
   unittest.main()
