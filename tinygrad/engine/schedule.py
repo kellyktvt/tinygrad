@@ -10,7 +10,7 @@ from tinygrad.shape.symbolic import Variable, sint
 from tinygrad.dtype import ConstType, ImageDType, PtrDType, dtypes
 from tinygrad.lazy import LazyBuffer
 from tinygrad.shape.shapetracker import ShapeTracker
-from tinygrad.device import Buffer
+from tinygrad.device import Buffer, Device
 from tinygrad.shape.view import View, strides_for_shape
 
 # creation can recurse a lot
@@ -164,6 +164,12 @@ def _recursive_uop(buf:LazyBuffer, st:ShapeTracker, outputs:Tuple[LazyBuffer, ..
   if buf.op is UnaryOps.CAST: return cache.setdefault((buf, st), UOp(UOps.CAST, dtype, in_uops))
   if buf.op is UnaryOps.BITCAST: return cache.setdefault((buf, st), UOp(UOps.BITCAST, dtype, in_uops))
   return cache.setdefault((buf, st), UOp(UOps.ALU, dtype, in_uops, buf.op))
+
+def split_lsi(lsi:LBScheduleItem) -> List[LBScheduleItem]:
+  ret: List[LBScheduleItem] = [lsi]
+  if (buf_max:=Device[lsi.bufs[0].device].renderer.buf_max) is None or len(lsi.bufs) < buf_max: return ret
+  assert lsi.ast.op is UOps.SINK, f"can't split {lsi.ast}"
+  return [lsi]
 
 def _lower_lazybuffer(outs:List[LazyBuffer], realizes:Dict[LazyBuffer, None]) -> Tuple[LBScheduleItem, Dict[Variable, int]]:
   """describe the computation for a LazyBuffer with UOp + inputs + var_vals"""
@@ -368,8 +374,9 @@ def _graph_schedule(outs:List[LazyBuffer]) -> \
   prescheduled: List[LBScheduleItem] = []
   var_vals: Dict[Variable, int] = {}
   for group in output_groups.values():
-    prescheduled.append((ret:=_lower_lazybuffer(group, realizes))[0])
-    var_vals = merge_dicts([var_vals, ret[1]])
+    lsi, lsi_var_vals = _lower_lazybuffer(group, realizes)
+    prescheduled.extend(split_lsi(lsi))
+    var_vals = merge_dicts([var_vals, lsi_var_vals])
   schedule_targets = {out:lsi for lsi in prescheduled for out in lsi.outputs}
 
   graph: DefaultDict[LBScheduleItem, List[LBScheduleItem]] = defaultdict(list)
